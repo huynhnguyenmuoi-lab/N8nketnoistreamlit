@@ -2,6 +2,8 @@ import streamlit as st
 import requests
 import uuid
 import re
+import os
+from urllib.parse import urlparse
 
 # Hàm đọc nội dung từ file văn bản
 def rfile(name_file):
@@ -12,15 +14,37 @@ def rfile(name_file):
             st.error(f"File {name_file} không tồn tại.")
 
 # Constants
-BEARER_TOKEN = st.secrets.get("BEARER_TOKEN")
-WEBHOOK_URL = st.secrets.get("WEBHOOK_URL")
-#WEBHOOK_URL = rfile("WEBHOOK_URL.txt")
+def _get_secret(key: str, default: str | None = None) -> str | None:
+    # Streamlit Cloud: set secrets in App settings; local: env var fallback.
+    try:
+        val = st.secrets.get(key, default)
+    except Exception:
+        val = default
+    if val in (None, ""):
+        val = os.getenv(key, default)
+    return val
+
+
+BEARER_TOKEN = _get_secret("BEARER_TOKEN")
+WEBHOOK_URL = _get_secret("WEBHOOK_URL")
+
+def _is_valid_http_url(url: str | None) -> bool:
+    if not url:
+        return False
+    try:
+        p = urlparse(url)
+        return p.scheme in ("http", "https") and bool(p.netloc)
+    except Exception:
+        return False
+
 def generate_session_id():
     return str(uuid.uuid4())
 
 def send_message_to_llm(session_id, message):
+    if not _is_valid_http_url(WEBHOOK_URL):
+        return "Error: WEBHOOK_URL chưa được cấu hình hoặc không hợp lệ.", None
     headers = {
-        "Authorization": f"Bearer {BEARER_TOKEN}",
+        "Authorization": f"Bearer {BEARER_TOKEN or ''}",
         "Content-Type": "application/json"
     }
     payload = {
@@ -28,7 +52,7 @@ def send_message_to_llm(session_id, message):
         "chatInput": message
     }
     try:
-        response = requests.post(WEBHOOK_URL, json=payload, headers=headers)
+        response = requests.post(WEBHOOK_URL, json=payload, headers=headers, timeout=60)
         response.raise_for_status()
         response_data = response.json()
         try:
@@ -112,6 +136,12 @@ def main():
         unsafe_allow_html=True
     )
 
+    if not _is_valid_http_url(WEBHOOK_URL):
+        st.warning(
+            "Chưa có `WEBHOOK_URL` hợp lệ. "
+            "Trên Streamlit Cloud, vào **App settings → Secrets** và set `WEBHOOK_URL` (và `BEARER_TOKEN` nếu cần)."
+        )
+
     # Khởi tạo session state
     if "messages" not in st.session_state:
         st.session_state.messages = []
@@ -136,7 +166,7 @@ def main():
             st.markdown(f'<div class="user">{message["content"]}</div>', unsafe_allow_html=True)
 
     # Ô nhập liệu cho người dùng
-    if prompt := st.chat_input("Nhập nội dung cần trao đổi ở đây nhé?"):
+    if prompt := st.chat_input("Nhập nội dung cần trao đổi ở đây nhé?", disabled=not _is_valid_http_url(WEBHOOK_URL)):
         # Thêm tin nhắn người dùng vào lịch sử
         st.session_state.messages.append({"role": "user", "content": prompt})
         
