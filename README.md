@@ -3,7 +3,7 @@
 ## Deploy trên Streamlit Community Cloud
 
 - **Main file path**: `streamlit_app.py`
-- **Python**: dự án đã pin trong `runtime.txt` (khuyến nghị `python-3.11`)
+- **Python**: chọn trong **Advanced settings** lúc deploy (khuyến nghị **Python 3.11** hoặc **3.12**)
 - **Dependencies**: `requirements.txt`
 
 ### Secrets (bắt buộc)
