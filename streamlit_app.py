@@ -4,6 +4,7 @@ import uuid
 import re
 import os
 from urllib.parse import urlparse
+import json
 
 # Hàm đọc nội dung từ file văn bản
 def rfile(name_file):
@@ -27,6 +28,7 @@ def _get_secret(key: str, default: str | None = None) -> str | None:
 
 BEARER_TOKEN = _get_secret("BEARER_TOKEN")
 WEBHOOK_URL = _get_secret("WEBHOOK_URL")
+N8N_BASE_URL = _get_secret("N8N_BASE_URL")
 
 def _is_valid_http_url(url: str | None) -> bool:
     if not url:
@@ -37,11 +39,69 @@ def _is_valid_http_url(url: str | None) -> bool:
     except Exception:
         return False
 
+_UUID_RE = re.compile(
+    r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b"
+)
+
+
+def _extract_webhook_id_from_n8n_workflow(path: str = "05. TroLydemo_1.json") -> str | None:
+    """
+    Đọc file workflow n8n (export JSON) và lấy webhookId của node type `n8n-nodes-base.webhook`.
+    """
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        for node in data.get("nodes", []):
+            if node.get("type") == "n8n-nodes-base.webhook":
+                wid = node.get("webhookId")
+                if isinstance(wid, str) and _UUID_RE.search(wid):
+                    return _UUID_RE.search(wid).group(0)
+    except Exception:
+        return None
+    return None
+
+
+def _normalize_n8n_webhook_url(url: str | None) -> str | None:
+    """
+    Sửa các URL bị dính ký tự rác sau UUID.
+    Ví dụ: .../webhook-test/<uuid>rf3... -> .../webhook-test/<uuid>
+    """
+    if not url:
+        return None
+    m = _UUID_RE.search(url)
+    if not m:
+        return url
+    wid = m.group(0)
+    # giữ nguyên prefix trước UUID (bao gồm /webhook-test/)
+    prefix = url[: m.start(0)]
+    # nếu prefix không kết thúc bằng '/', thêm cho chắc
+    if prefix and not prefix.endswith("/"):
+        prefix += "/"
+    return f"{prefix}{wid}"
+
+
+def _resolve_webhook_url() -> str | None:
+    # 1) ưu tiên URL từ secrets/env nhưng normalize
+    if WEBHOOK_URL:
+        return _normalize_n8n_webhook_url(WEBHOOK_URL)
+
+    # 2) nếu có base URL, tự ghép từ file workflow
+    if not N8N_BASE_URL:
+        return None
+    wid = _extract_webhook_id_from_n8n_workflow()
+    if not wid:
+        return None
+    base = N8N_BASE_URL.rstrip("/")
+    return f"{base}/webhook-test/{wid}"
+
+
+RESOLVED_WEBHOOK_URL = _resolve_webhook_url()
+
 def generate_session_id():
     return str(uuid.uuid4())
 
 def send_message_to_llm(session_id, message):
-    if not _is_valid_http_url(WEBHOOK_URL):
+    if not _is_valid_http_url(RESOLVED_WEBHOOK_URL):
         return "Error: WEBHOOK_URL chưa được cấu hình hoặc không hợp lệ.", None
     headers = {
         "Authorization": f"Bearer {BEARER_TOKEN or ''}",
@@ -52,7 +112,7 @@ def send_message_to_llm(session_id, message):
         "chatInput": message
     }
     try:
-        response = requests.post(WEBHOOK_URL, json=payload, headers=headers, timeout=60)
+        response = requests.post(RESOLVED_WEBHOOK_URL, json=payload, headers=headers, timeout=60)
         response.raise_for_status()
         response_data = response.json()
         try:
@@ -136,10 +196,11 @@ def main():
         unsafe_allow_html=True
     )
 
-    if not _is_valid_http_url(WEBHOOK_URL):
+    if not _is_valid_http_url(RESOLVED_WEBHOOK_URL):
         st.warning(
             "Chưa có `WEBHOOK_URL` hợp lệ. "
-            "Trên Streamlit Cloud, vào **App settings → Secrets** và set `WEBHOOK_URL` (và `BEARER_TOKEN` nếu cần)."
+            "Trên Streamlit Cloud, vào **App settings → Secrets** và set `WEBHOOK_URL` "
+            "(hoặc set `N8N_BASE_URL` để app tự ghép từ `05. TroLydemo_1.json`)."
         )
 
     # Khởi tạo session state
@@ -166,7 +227,10 @@ def main():
             st.markdown(f'<div class="user">{message["content"]}</div>', unsafe_allow_html=True)
 
     # Ô nhập liệu cho người dùng
-    if prompt := st.chat_input("Nhập nội dung cần trao đổi ở đây nhé?", disabled=not _is_valid_http_url(WEBHOOK_URL)):
+    if prompt := st.chat_input(
+        "Nhập nội dung cần trao đổi ở đây nhé?",
+        disabled=not _is_valid_http_url(RESOLVED_WEBHOOK_URL),
+    ):
         # Thêm tin nhắn người dùng vào lịch sử
         st.session_state.messages.append({"role": "user", "content": prompt})
         
